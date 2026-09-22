@@ -1,0 +1,515 @@
+---
+title: "LASI Social engagement joint model analysis"
+author: "Peiyao Zhu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    highlight: pygments
+    keep_md: no
+    number_sections: yes
+    smart: yes
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+---
+
+
+```{r, include=FALSE}
+
+library(devtools)
+library(pak)
+library(sp)
+library(INLA)
+library(INLAjoint)
+library(JMbayes)
+library(MASS)
+library(nlme)
+library(splines)
+library(survival)
+library(haven)
+library(tidyverse)
+library(dplyr)
+library(car)
+library(lme4)
+library(sas7bdat)
+library(ggplot2)
+library(gtsummary)
+library(ggeffects)
+library(viridisLite)
+library(RColorBrewer)
+
+```
+
+# Import data - score
+
+This dataset contains 3,869 observations.
+
+```{r}
+
+data_score1 <- read_dta("/Users/zpy/University of Michigan Dropbox/Peiyao Zhu/LASI_DAD_YY/Aim 3/My data/Update 062325/transformed_102425_score.dta")
+
+data_score1$wave <- as.numeric(data_score1$wave)
+data_score1 <- data_score1 %>% mutate(wave0 = case_when(
+    wave == 1 ~ 0,
+    wave == 2 ~ ttey)) 
+
+summary(data_score1$wave0)
+summary(data_score1$ttey)
+
+# delete wave 2 NA / update ttey and r1died
+data_score2 <- data_score1 %>% filter(!is.na(sgcp)) %>%
+  mutate(
+    ttey = if_else(wave != 1, NA_real_, ttey),
+    r1died = if_else(wave != 1, NA_real_, r1died)
+  )%>%
+  mutate(
+    education = case_when(
+      educ_self == 0 ~ "Never attend school",
+      educ_self == 1 ~ "Have Education"
+  )
+)
+
+
+```
+
+
+
+
+
+# format dataset - data / variable structure
+
+```{r}
+
+# wide format data
+data_wide_score <- read_dta("/Users/zpy/University of Michigan Dropbox/Peiyao Zhu/LASI_DAD_YY/Aim 3/My data/Update 062325/LASI_ex_102425_scoreupdate.dta")
+
+data_wide_score <- data_wide_score %>% mutate(wave=1, wave0=0) %>%
+  mutate(
+    education = case_when(
+      educ_self == 0 ~ "Never attend school",
+      educ_self == 1 ~ "Have Education"
+    ),
+    status = case_when(
+      is.na(sgcp2) ~ "Lost follow-up",
+      !is.na(sgcp2) ~ "Have follow-up",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# Full JM Model dataset-wide
+data_full_wide_score <- data_wide_score %>% 
+  dplyr::select(score, score_binary, age_dad1, agesqr_dad1, male, cmastat1, creligion1, caste1, hhpcconsum, 
+                cchildhl, chfiance, rural1, ceduc_l, educ_self, educ_moth, educ_fath, 
+                depress1, adltot1, chronic1, wave0, prim_key, ttey, r1died, education, status)
+summary(data_full_wide_score)
+
+
+# Full JM Model dataset-long
+data_full_score <- data_score2 %>% 
+  dplyr::select(score, score_binary, age_dad1, agesqr_dad1, male, cmastat1, creligion1, caste1, hhpcconsum, 
+                cchildhl, chfiance, rural1, ceduc_l, educ_self, educ_moth, educ_fath, 
+                depress1, adltot1, chronic1, wave0, sgcp, bexefu, bmemory, borient, blangf, bvsp, prim_key,
+                ttey, r1died, education, weight1)
+summary(data_full_score)
+
+# Convert the specified variables to factors
+factor_vars <- c("male", "creligion1", "caste1", "hhpcconsum", "score_binary",
+                 "rural1", "cchildhl", "chfiance", "ceduc_l", "educ_self", 
+                 "educ_moth", "educ_fath", "depress1", "adltot1", "chronic1", "education")
+
+data_full_wide_score[factor_vars] <- lapply(data_full_wide_score[factor_vars], as.factor)
+data_full_score[factor_vars] <- lapply(data_full_score[factor_vars], as.factor)
+
+# center age at mean
+data_full_wide_score <- data_full_wide_score %>%
+  mutate(age_dad1_centered = age_dad1 - mean(age_dad1, na.rm = TRUE))%>%
+  mutate(age_dad1_centered_sq = age_dad1_centered^2)
+data_full_score <- data_full_score %>%
+  mutate(age_dad1_centered = age_dad1 - mean(age_dad1, na.rm = TRUE))%>%
+  mutate(age_dad1_centered_sq = age_dad1_centered^2)
+
+data_full_score$prim_key <- as.factor(data_full_score$prim_key)
+data_full_wide_score$prim_key <- as.factor(data_full_wide_score$prim_key)
+data_full_wide_score$r1died <- as.numeric(as.character(data_full_wide_score$r1died))
+data_full_wide_score$ttey <- as.numeric(data_full_wide_score$ttey)
+data_full_score$wave0 <- as.numeric(data_full_score$wave0)
+data_full_wide_score$r1died <- as.factor(data_full_wide_score$r1died)
+
+# reverse social isolation index score to social engagement score
+data_full_score$socengage <- 12-data_full_score$score
+data_full_wide_score$socengage <- 12-data_full_wide_score$score
+
+# Longitudinal model score_binary reverse 
+data_full_score <- data_full_score %>%
+  mutate(
+    socengage_binary = case_when(
+      socengage >= 5 ~ "High Engagement",
+      socengage <= 4 ~ "Low Engagement",
+      TRUE           ~ NA_character_
+    ) %>% 
+      factor(levels = c("High Engagement", "Low Engagement")),
+
+    educ_self = factor(educ_self)
+  ) %>%
+
+  mutate(
+    educ_self = fct_relevel(educ_self, "1")
+  )
+
+# Survival model score_binary reverse 
+data_full_wide_score <- data_full_wide_score %>%
+  mutate(
+   socengage_binary = case_when(
+      socengage >= 5 ~ "High Engagement",
+      socengage <= 4 ~ "Low Engagement",
+      TRUE           ~ NA_character_
+    ) %>% 
+      factor(levels = c("High Engagement", "Low Engagement")),
+    
+    educ_self = factor(educ_self)
+  ) %>%
+  mutate(
+    educ_self = fct_relevel(educ_self, "1")
+  )
+
+data_full_score$ttey[data_full_score$ttey == 0] <- 0.001
+data_full_wide_score$ttey[data_full_wide_score$ttey == 0] <- 0.001
+data_full_score$socengage_binary <- relevel(data_full_score$socengage_binary, ref = "Low Engagement")
+data_full_wide_score$socengage_binary <- relevel(data_full_wide_score$socengage_binary, ref = "Low Engagement")
+
+write_dta(data_full_score, "Path")
+
+write_dta(data_full_wide_score, "Path")
+
+```
+
+
+
+# Sample Distribution by Education
+```{r}
+
+# Creating the summary table
+data_full_wide_score %>% 
+  dplyr::select(socengage, socengage_binary, education, age_dad1, agesqr_dad1, age_dad1_centered, age_dad1_centered_sq, male, cmastat1,
+                creligion1, caste1, hhpcconsum, cchildhl, chfiance, rural1, ceduc_l, educ_moth, educ_fath,
+                depress1, adltot1, chronic1, score, score_binary, educ_self, r1died, status) %>% 
+  gtsummary::tbl_summary(
+    by = education, 
+    type = score ~ "continuous2",
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 2,
+    label = list(
+      score ~ "Social Isolation Index Score",
+      score_binary ~ "Social Isolation Index Binary",
+      socengage ~ "Social Engagement Score",
+      socengage_binary ~ "Social Engagement Index Binary",
+      age_dad1 ~ "Age",
+      agesqr_dad1 ~ "Age Squared",
+      age_dad1_centered ~ "Age (Mean)",
+      age_dad1_centered_sq ~ "Age (Mean) Squared",
+      male ~ "Sex",
+      cmastat1 ~ "Marital Status",
+      creligion1 ~ "Religion",
+      caste1 ~ "Caste",
+      hhpcconsum ~ "Household Per Capita Consumption",
+      cchildhl ~ "Childhood Health",
+      chfiance ~ "Childhood Finance",
+      rural1 ~ "Rural Area",
+      ceduc_l ~ "Education Level",
+      educ_moth ~ "Mother's Education",
+      educ_fath ~ "Father's Education",
+      depress1 ~ "Depression",
+      adltot1 ~ "ADL",
+      chronic1 ~ "Chronic Conditions",
+      educ_self ~ "Education Level",
+      r1died ~ "Survival"
+    )
+  ) %>%  
+  add_overall() %>% 
+  add_p(list(all_continuous() ~ "t.test"),
+        pvalue_fun = ~style_pvalue(.x, digits = 3))
+
+
+
+data_full_wide_score %>% 
+  dplyr::select(socengage, socengage_binary, education, age_dad1, agesqr_dad1, age_dad1_centered, age_dad1_centered_sq, male, cmastat1,
+                creligion1, caste1, hhpcconsum, cchildhl, chfiance, rural1, ceduc_l, educ_moth, educ_fath,
+                depress1, adltot1, chronic1, score, score_binary, educ_self, r1died, status) %>% 
+  gtsummary::tbl_summary(
+    by = socengage_binary, 
+    type = score ~ "continuous2",
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 2,
+    label = list(
+      education ~ "Education Level",
+      age_dad1 ~ "Age",
+      agesqr_dad1 ~ "Age Squared",
+      age_dad1_centered ~ "Age (Mean)",
+      age_dad1_centered_sq ~ "Age (Mean) Squared",
+      male ~ "Sex",
+      cmastat1 ~ "Marital Status",
+      creligion1 ~ "Religion",
+      caste1 ~ "Caste",
+      hhpcconsum ~ "Household Per Capita Consumption",
+      cchildhl ~ "Childhood Health",
+      chfiance ~ "Childhood Finance",
+      rural1 ~ "Rural Area",
+      ceduc_l ~ "Education Level",
+      educ_moth ~ "Mother's Education",
+      educ_fath ~ "Father's Education",
+      depress1 ~ "Depression",
+      adltot1 ~ "ADL",
+      chronic1 ~ "Chronic Conditions",
+      educ_self ~ "Education Level",
+      r1died ~ "Survival"
+    )
+  ) %>%  
+  add_overall() %>% 
+  add_p(list(all_continuous() ~ "t.test"),
+        pvalue_fun = ~style_pvalue(.x, digits = 3))
+
+
+```
+
+
+# Joint model - INLAjoint package
+
+
+```{r}
+
+# ID continuous
+
+data_full_score <- as.data.frame(data_full_score)
+data_full_wide_score <- as.data.frame(data_full_wide_score)
+
+id_map <- data.frame(
+  prim_key = unique(as.character(data_full_score$prim_key)),
+  id_jm = seq_along(unique(as.character(data_full_score$prim_key)))
+)
+
+data_full_score$id_jm <- id_map$id_jm[
+  match(as.character(data_full_score$prim_key), id_map$prim_key)
+]
+
+data_full_wide_score$id_jm <- id_map$id_jm[
+  match(as.character(data_full_wide_score$prim_key), id_map$prim_key)
+]
+
+
+```
+
+
+# General cognition - social engagement score - binary
+```{r}
+
+data_full_wide_score <- data_full_wide_score %>%
+  mutate(
+    r1died = as.integer(as.character(r1died))
+  )
+
+data_full_score <- data_full_score %>%
+  mutate(
+    r1died = as.integer(as.character(r1died))
+  )
+
+## Longitudinal model formula (lform)
+### LME general domain - model interaction: age, religion, childhood health, rural residence
+lform_sgcp_score_model_bi <- sgcp ~ socengage_binary + wave0 + wave0 * socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + creligion1 + caste1 + hhpcconsum + cchildhl + 
+                         chfiance + rural1 + educ_self + educ_moth + educ_fath + depress1 + 
+                         adltot1 + chronic1 + educ_self*socengage_binary + wave0*educ_self + wave0:socengage_binary*educ_self +
+                         wave0*age_dad1_centered + wave0*creligion1 + wave0*cchildhl + 
+                         wave0*rural1 + (1 + wave0 | id_jm)
+
+## Survival model formula (sform)
+sform_sgcp_score_model_bi <- inla.surv(ttey, r1died) ~ socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary
+
+## Fit the joint model with INLAjoint
+joint_sgcp_score_model_bi <- joint(
+  formSurv = sform_sgcp_score_model_bi,
+  formLong = lform_sgcp_score_model_bi, 
+  family = "normal",
+  dataLong = data_full_score,
+  dataSurv = data_full_wide_score,
+  id = "id_jm",
+  timeVar = "wave0",
+  assoc = "SRE",
+  basRisk = "rw2",
+  NbasRisk = 10,
+  control = list(int.strategy = "eb")
+)
+
+# Summarize models
+summary(joint_sgcp_score_model_bi,hr=TRUE)
+
+
+```
+
+
+# executive function - social engagement score - binary
+```{r}
+
+### LME Executive fuction domain - model interaction: caste, religion, childhood health, rural residence
+lform_exe_score_model_bi <- bexefu ~ socengage_binary + wave0 + wave0*socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary + wave0*educ_self + 
+                         wave0:socengage_binary*educ_self + wave0*caste1 + wave0*creligion1 + wave0*cchildhl + 
+                         wave0*rural1 + (1 + wave0 | id_jm)
+
+## Survival model formula (sform)
+sform_exe_score_model_bi <- inla.surv(ttey, r1died) ~ socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary
+
+## Fit the joint model with INLAjoint
+joint_exe_score_model_bi <- joint(
+  formSurv = sform_exe_score_model_bi,
+  formLong = lform_exe_score_model_bi, 
+  family = "normal",
+  dataLong = data_full_score,
+  dataSurv = data_full_wide_score,
+  id = "id_jm",
+  timeVar = "wave0",
+  assoc = "SRE",
+  basRisk = "rw2",
+  NbasRisk = 10,
+  control = list(int.strategy = "eb")
+)
+
+# Summarize models
+summary(joint_exe_score_model_bi,hr=TRUE)
+
+```
+
+
+
+
+# memory function - social engagement score -  binary
+```{r}
+summary(data_full_wide_score$socengage_binary)
+## Longitudinal model formula (lform)
+### LME memory domain - model interaction: age, religion, childhood health, ADL, rural residence, chronic conditions
+lform_mem_score_model_bi <- bmemory ~ socengage_binary + wave0 + wave0 * socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + 
+                         chfiance + rural1 + educ_self + educ_moth + educ_fath + depress1 + 
+                         adltot1 + chronic1 + educ_self*socengage_binary + wave0*educ_self + wave0:socengage_binary*educ_self +
+                         wave0*age_dad1_centered + wave0*adltot1 + wave0*creligion1 + wave0*cchildhl + 
+                         wave0*rural1 + wave0*chronic1 + (1 + wave0 | id_jm)
+
+## Survival model formula (sform)
+sform_mem_score_model_bi <- inla.surv(ttey, r1died) ~ socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary
+
+## Fit the joint model with INLAjoint
+joint_mem_score_model_bi <- joint(
+  formSurv = sform_mem_score_model_bi,
+  formLong = lform_mem_score_model_bi, 
+  family = "normal",
+  dataLong = data_full_score,
+  dataSurv = data_full_wide_score,
+  id = "id_jm",
+  timeVar = "wave0",
+  assoc = "SRE",
+  basRisk = "rw2",
+  NbasRisk = 10,
+  control = list(int.strategy = "eb")
+)
+
+# Summarize models
+summary(joint_mem_score_model_bi,hr=TRUE)
+
+```
+
+
+
+
+# language function - social engagement score - binary
+```{r}
+
+### LME language domain - model interaction: age, religion, childhood health, childhood financial status, rural residence, household consumption
+lform_lan_score_model_bi <- blangf ~ socengage_binary + wave0 + wave0 * socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + 
+                         chfiance + rural1 + educ_self + educ_moth + educ_fath + depress1 + 
+                         adltot1 + chronic1 + educ_self*socengage_binary + wave0*educ_self + 
+                         wave0:socengage_binary*educ_self +
+                         wave0*age_dad1_centered + wave0*creligion1 + wave0*cchildhl + 
+                         wave0*rural1 + wave0*hhpcconsum + wave0*chfiance + (1 + wave0 | id_jm)
+
+## Survival model formula (sform)
+sform_lan_score_model_bi <- inla.surv(ttey, r1died) ~ socengage_binary + age_dad1_centered + age_dad1_centered_sq + male +
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary
+
+## Fit the joint model with INLAjoint
+joint_lan_score_model_bi <- joint(
+  formSurv = sform_lan_score_model_bi,
+  formLong = lform_lan_score_model_bi, 
+  family = "normal",
+  dataLong = data_full_score,
+  dataSurv = data_full_wide_score,
+  id = "id_jm",
+  timeVar = "wave0",
+  assoc = "SRE",
+  basRisk = "rw2",
+  NbasRisk = 10,
+  control = list(int.strategy = "eb")
+)
+
+# Summarize models
+summary(joint_lan_score_model_bi,hr=TRUE)
+
+```
+
+
+
+
+# visuospatial function - social engagement score - binary
+```{r}
+
+### LME visuospatial domain - model interaction: age, gender, religion, childhood health
+lform_visu_score_model_bi <- bvsp ~ socengage_binary + wave0 + wave0 * socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + 
+                         chfiance + rural1 + educ_self + educ_moth + educ_fath + depress1 + 
+                         adltot1 + chronic1 + educ_self*socengage_binary + wave0*educ_self + 
+                         wave0*socengage_binary*educ_self +
+                         wave0*age_dad1_centered + wave0*male + wave0*creligion1 + wave0*cchildhl + (1 + wave0 | id_jm)
+
+## Survival model formula (sform)
+sform_visu_score_model_bi <- inla.surv(ttey, r1died) ~ socengage_binary + age_dad1_centered + age_dad1_centered_sq + male + 
+                         creligion1 + caste1 + hhpcconsum + cchildhl + chfiance + rural1 + educ_self + educ_moth + 
+                         educ_fath + depress1 + adltot1 + chronic1 + educ_self*socengage_binary
+
+## Fit the joint model with INLAjoint
+joint_visu_score_model_bi <- joint(
+  formSurv = sform_visu_score_model_bi,
+  formLong = lform_visu_score_model_bi, 
+  family = "normal",
+  dataLong = data_full_score,
+  dataSurv = data_full_wide_score,
+  id = "id_jm",
+  timeVar = "wave0",
+  assoc = "SRE",
+  basRisk = "rw2",
+  NbasRisk = 10,
+  control = list(int.strategy = "eb")
+)
+
+# Summarize models
+summary(joint_visu_score_model_bi,hr=TRUE)
+
+```
+
+
+
