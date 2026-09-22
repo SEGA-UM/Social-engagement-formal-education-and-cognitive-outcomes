@@ -49,7 +49,7 @@ This dataset contains 3,869 observations.
 
 ```{r}
 
-data_score1 <- read_dta("/Users/zpy/University of Michigan Dropbox/Peiyao Zhu/LASI_DAD_YY/Aim 3/My data/Update 062325/transformed_102425_score.dta")
+data_score1 <- read_dta("Path")
 
 data_score1$wave <- as.numeric(data_score1$wave)
 data_score1 <- data_score1 %>% mutate(wave0 = case_when(
@@ -84,7 +84,7 @@ data_score2 <- data_score1 %>% filter(!is.na(sgcp)) %>%
 ```{r}
 
 # wide format data
-data_wide_score <- read_dta("/Users/zpy/University of Michigan Dropbox/Peiyao Zhu/LASI_DAD_YY/Aim 3/My data/Update 062325/LASI_ex_102425_scoreupdate.dta")
+data_wide_score <- read_dta("Path")
 
 data_wide_score <- data_wide_score %>% mutate(wave=1, wave0=0) %>%
   mutate(
